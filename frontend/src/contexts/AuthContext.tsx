@@ -1,0 +1,93 @@
+import { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import { Session, User } from "@supabase/supabase-js";
+import { supabase } from "@/integrations/supabase/client";
+import type { Database } from "@/integrations/supabase/types";
+
+type AppRole = Database["public"]["Enums"]["app_role"];
+
+interface AuthContextType {
+  session: Session | null;
+  user: User | null;
+  role: AppRole | null;
+  profile: { nome: string; email: string } | null;
+  loading: boolean;
+  signOut: () => Promise<void>;
+}
+
+const AuthContext = createContext<AuthContextType>({
+  session: null,
+  user: null,
+  role: null,
+  profile: null,
+  loading: true,
+  signOut: async () => {},
+});
+
+export const useAuth = () => useContext(AuthContext);
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [session, setSession] = useState<Session | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [role, setRole] = useState<AppRole | null>(null);
+  const [profile, setProfile] = useState<{ nome: string; email: string } | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const fetchUserData = async (userId: string) => {
+    try {
+      const [roleRes, profileRes] = await Promise.all([
+        supabase.from("user_roles").select("role").eq("user_id", userId).maybeSingle(),
+        supabase.from("profiles").select("nome, email").eq("id", userId).maybeSingle(),
+      ]);
+      if (roleRes.data) setRole(roleRes.data.role);
+      if (profileRes.data) setProfile(profileRes.data);
+    } catch (err) {
+      console.error("Error fetching user data:", err);
+    }
+  };
+
+  useEffect(() => {
+    // Get initial session first
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        fetchUserData(session.user.id).finally(() => setLoading(false));
+      } else {
+        setLoading(false);
+      }
+    });
+
+    // Then listen for changes - defer data fetching to avoid deadlocks
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        setSession(session);
+        setUser(session?.user ?? null);
+        if (session?.user) {
+          setTimeout(() => {
+            fetchUserData(session.user.id).finally(() => setLoading(false));
+          }, 0);
+        } else {
+          setRole(null);
+          setProfile(null);
+          setLoading(false);
+        }
+      }
+    );
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const signOut = async () => {
+    await supabase.auth.signOut();
+    setSession(null);
+    setUser(null);
+    setRole(null);
+    setProfile(null);
+  };
+
+  return (
+    <AuthContext.Provider value={{ session, user, role, profile, loading, signOut }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
